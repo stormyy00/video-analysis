@@ -51,10 +51,13 @@ class SearchRequest(BaseModel):
 
 class SearchResult(BaseModel):
     video_id: str
-    timestamp: float
+    timestamp: float       # best-matching frame within the scene
+    t_start: float         # scene window start
+    t_end: float           # scene window end
     score: float
     thumbnail_url: str
     video_title: str
+    duration: float | None = None
 
 
 class VideoListItem(BaseModel):

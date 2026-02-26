@@ -205,6 +205,32 @@ async def delete_video(video_id: str):
     return {"deleted": video_id}
 
 
+def _cluster_to_scenes(raw: list[dict], gap: float = 2.0) -> list[dict]:
+    """Cluster per-frame results into scene windows by grouping frames within `gap` seconds."""
+    if not raw:
+        return []
+    sorted_raw = sorted(raw, key=lambda r: r["t"])
+    clusters: list[list[dict]] = []
+    cluster = [sorted_raw[0]]
+    for r in sorted_raw[1:]:
+        if r["t"] - cluster[-1]["t"] <= gap:
+            cluster.append(r)
+        else:
+            clusters.append(cluster)
+            cluster = [r]
+    clusters.append(cluster)
+
+    scenes = []
+    for c in clusters:
+        best = max(c, key=lambda r: r["score"])
+        scenes.append({
+            **best,
+            "t_start": c[0]["t"],
+            "t_end": c[-1]["t"] + 1.0,  # +1s since each frame covers ~1 second
+        })
+    return scenes
+
+
 @app.post("/api/search", response_model=list[SearchResult])
 async def search(req: SearchRequest):
     """
@@ -229,15 +255,20 @@ async def search(req: SearchRequest):
         index.index_features = idx_data.index_features
         index.index_metadata = idx_data.index_metadata
 
-        raw = index.search(req.query, n=req.n, threshold=req.threshold)
-        for r in raw:
+        # Collect all above-threshold frames (over-fetch), then cluster into scenes
+        raw = index.search(req.query, n=req.n * 5, threshold=req.threshold)
+        scenes = _cluster_to_scenes(raw)
+        for s in scenes:
             all_results.append(
                 SearchResult(
-                    video_id=r["video_id"],
-                    timestamp=r["t"],
-                    score=r["score"],
-                    thumbnail_url=r["thumbnail_url"],
+                    video_id=s["video_id"],
+                    timestamp=s["t"],
+                    t_start=s["t_start"],
+                    t_end=s["t_end"],
+                    score=s["score"],
+                    thumbnail_url=s["thumbnail_url"],
                     video_title=record.filename,
+                    duration=record.duration,
                 )
             )
 
