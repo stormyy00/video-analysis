@@ -12,6 +12,10 @@ export interface UploadTask {
   indexed_frames: number
   total_frames: number
   error?: string
+  uploadStartTime: number
+  uploadedBytes: number
+  totalBytes: number
+  indexingStartTime: number
 }
 
 interface ActivityStore {
@@ -23,6 +27,45 @@ interface ActivityStore {
   updateTask: (id: string, updates: Partial<UploadTask>) => void
   removeTask: (id: string) => void
   uploadAndTrack: (file: File) => Promise<void>
+}
+
+function formatEta(seconds: number): string {
+  if (seconds < 60) return `~${Math.ceil(seconds)}s remaining`
+  const mins = Math.ceil(seconds / 60)
+  return `~${mins} min remaining`
+}
+
+export function calculateEta(task: UploadTask): string | null {
+  const now = Date.now()
+  if (task.status === 'uploading') {
+    if (task.uploadedBytes <= 0 || task.uploadStartTime <= 0) return null
+    const elapsed = (now - task.uploadStartTime) / 1000
+    if (elapsed < 1) return null
+    const rate = task.uploadedBytes / elapsed
+    const remaining = (task.totalBytes - task.uploadedBytes) / rate
+    return formatEta(remaining)
+  }
+  if (task.status === 'indexing' && task.indexed_frames > 0 && task.indexingStartTime > 0) {
+    const elapsed = (now - task.indexingStartTime) / 1000
+    if (elapsed < 1) return null
+    const rate = task.indexed_frames / elapsed
+    const remaining = (task.total_frames - task.indexed_frames) / rate
+    return formatEta(remaining)
+  }
+  return null
+}
+
+export function combinedProgress(task: UploadTask): number {
+  if (task.status === 'uploading') {
+    if (task.totalBytes === 0) return 0
+    return (task.uploadedBytes / task.totalBytes) * 0.4
+  }
+  if (task.status === 'pending') return 0.4
+  if (task.status === 'indexing') {
+    return 0.4 + task.progress * 0.6
+  }
+  if (task.status === 'ready') return 1
+  return 0
 }
 
 export const useActivityStore = create<ActivityStore>((set, get) => ({
@@ -57,10 +100,17 @@ export const useActivityStore = create<ActivityStore>((set, get) => ({
       progress: 0,
       indexed_frames: 0,
       total_frames: 0,
+      uploadStartTime: Date.now(),
+      uploadedBytes: 0,
+      totalBytes: file.size,
+      indexingStartTime: 0,
     })
 
     try {
-      const status = await api.uploadVideo(file)
+      const status = await api.uploadVideoWithProgress(file, (loaded, total) => {
+        updateTask(tempId, { uploadedBytes: loaded, totalBytes: total })
+      })
+
       updateTask(tempId, {
         id: status.id,
         status: status.status as TaskStatus,
@@ -70,16 +120,26 @@ export const useActivityStore = create<ActivityStore>((set, get) => ({
       })
 
       const realId = status.id
+      let hasSetIndexingStart = false
+
       const poll = setInterval(async () => {
         try {
           const latest = await api.getVideoStatus(realId)
-          updateTask(realId, {
+
+          const updates: Partial<UploadTask> = {
             status: latest.status as TaskStatus,
             progress: latest.progress,
             indexed_frames: latest.indexed_frames,
             total_frames: latest.total_frames,
             error: latest.error ?? undefined,
-          })
+          }
+
+          if (latest.status === 'indexing' && !hasSetIndexingStart) {
+            updates.indexingStartTime = Date.now()
+            hasSetIndexingStart = true
+          }
+
+          updateTask(realId, updates)
 
           if (latest.status === 'ready' || latest.status === 'error') {
             clearInterval(poll)
