@@ -47,6 +47,12 @@ class SearchRequest(BaseModel):
     query: str
     n: int = 6
     threshold: float = 25.0
+    video_id: str | None = None
+
+
+class ThumbnailEntry(BaseModel):
+    timestamp: float
+    url: str
 
 
 class SearchResult(BaseModel):
