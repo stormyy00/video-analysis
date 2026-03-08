@@ -1,13 +1,9 @@
 import { useRef, useState, type WheelEventHandler, type PointerEvent as ReactPointerEvent } from 'react'
+import { useNavigate } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
 import { api } from '@/lib/api'
 import type { SearchResult } from '@/lib/api'
 import { formatTime } from '@/components/card'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
 import { Play, Video } from 'lucide-react'
 
 export interface VideoGroup {
@@ -18,12 +14,36 @@ export interface VideoGroup {
   bestResult: SearchResult  // highest score — used for thumbnail + hover preview
 }
 
-interface VideoGroupCardProps {
-  group: VideoGroup
-  onTimestampClick: (result: SearchResult) => void
+export interface BrowseVideo {
+  video_id: string
+  video_title: string
+  duration: number | null
+  created_at: string
 }
 
-export default function VideoGroupCard({ group, onTimestampClick }: VideoGroupCardProps) {
+export type CardData = VideoGroup | BrowseVideo
+
+function isVideoGroup(data: CardData): data is VideoGroup {
+  return 'results' in data && Array.isArray((data as VideoGroup).results)
+}
+
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'now'
+  if (mins < 60) return `${mins}m`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h`
+  const days = Math.floor(hours / 24)
+  return `${days}d`
+}
+
+interface VideoGroupCardProps {
+  data: CardData
+}
+
+export default function VideoGroupCard({ data }: VideoGroupCardProps) {
+  const navigate = useNavigate()
   const videoRef = useRef<HTMLVideoElement>(null)
   const progressBarRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
@@ -35,12 +55,17 @@ export default function VideoGroupCard({ group, onTimestampClick }: VideoGroupCa
   const hasSeededStartRef = useRef(false)
   const isScrubbingRef = useRef(false)
 
-  const { bestResult, results, video_title } = group
+  const isSearch = isVideoGroup(data)
+  const bestResult = isSearch ? data.bestResult : null
+  const results = isSearch ? data.results : []
+  const { video_title } = data
 
   const effectiveDuration =
-    group.duration != null && group.duration > 0
-      ? group.duration
-      : Math.max(...results.map((r) => r.timestamp)) + 30
+    data.duration != null && data.duration > 0
+      ? data.duration
+      : isSearch
+        ? Math.max(...results.map((r) => r.timestamp)) + 30
+        : 60
 
   const duration = resolvedDuration ?? effectiveDuration
   const progressPct = Math.min(Math.max((currentTime / duration) * 100, 0), 100)
@@ -51,7 +76,6 @@ export default function VideoGroupCard({ group, onTimestampClick }: VideoGroupCa
     setCurrentTime(clamped)
     if (!v) return
 
-    // Queue seeks until metadata is available; prevents wheel scrubbing from being ignored.
     if (v.readyState >= 1) {
       v.currentTime = clamped
       return
@@ -115,7 +139,7 @@ export default function VideoGroupCard({ group, onTimestampClick }: VideoGroupCa
     if (!v) return
 
     if (!hasSeededStartRef.current) {
-      seekTo(bestResult.t_start)
+      seekTo(bestResult ? bestResult.t_start : 0)
       hasSeededStartRef.current = true
     }
 
@@ -141,6 +165,16 @@ export default function VideoGroupCard({ group, onTimestampClick }: VideoGroupCa
     seekTo(currentTime + deltaSeconds)
   }
 
+  const handleClick = () => {
+    void navigate({
+      to: '/video/$videoId',
+      params: { videoId: data.video_id },
+      search: isSearch && bestResult ? { t: bestResult.t_start } : {},
+    })
+  }
+
+  const relativeTime = isSearch ? undefined : timeAgo((data as BrowseVideo).created_at)
+
   return (
     <div
       className={cn(
@@ -158,22 +192,27 @@ export default function VideoGroupCard({ group, onTimestampClick }: VideoGroupCa
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         onWheel={handleWheel}
-        onClick={() => onTimestampClick(bestResult)}
+        onClick={handleClick}
       >
-        <img
-          src={api.thumbnailUrl(bestResult.thumbnail_url)}
-          alt={video_title}
-          className="absolute inset-0 w-full h-full object-cover transition-opacity duration-300"
-          style={{ opacity: isHovered ? 0 : 1 }}
-          loading="lazy"
-        />
+        {/* Static thumbnail — only for search mode with a real thumbnail */}
+        {isSearch && bestResult && (
+          <img
+            src={api.thumbnailUrl(bestResult.thumbnail_url)}
+            alt={video_title}
+            className="absolute inset-0 w-full h-full object-cover transition-opacity duration-300"
+            style={{ opacity: isHovered ? 0 : 1 }}
+            loading="lazy"
+          />
+        )}
 
         <video
           ref={videoRef}
-          src={api.streamUrl(group.video_id)}
+          src={api.streamUrl(data.video_id)}
           className={cn(
             'absolute inset-0 w-full h-full object-cover transition-opacity duration-300',
-            isHovered ? 'opacity-100' : 'opacity-0',
+            // In browse mode, video is always visible (acts as poster via preload)
+            // In search mode, only visible on hover
+            isSearch ? (isHovered ? 'opacity-100' : 'opacity-0') : 'opacity-100',
           )}
           muted
           playsInline
@@ -182,8 +221,8 @@ export default function VideoGroupCard({ group, onTimestampClick }: VideoGroupCa
           onTimeUpdate={(e) => {
             const t = e.currentTarget.currentTime
             setCurrentTime(t)
-            // Loop the first matched scene while hovering (skip when manually scrubbing)
-            if (isHovered && !isScrubbingRef.current && t >= bestResult.t_end) {
+            // Loop the first matched scene while hovering (search mode only)
+            if (isSearch && bestResult && isHovered && !isScrubbingRef.current && t >= bestResult.t_end) {
               e.currentTarget.currentTime = bestResult.t_start
             }
           }}
@@ -242,8 +281,8 @@ export default function VideoGroupCard({ group, onTimestampClick }: VideoGroupCa
           </span>
         </div>
 
-        {/* Match count badge */}
-        {results.length > 1 && (
+        {/* Match count badge — search mode only */}
+        {isSearch && results.length > 1 && (
           <div className="absolute top-3 right-3 px-2 py-1 rounded-full bg-black/60 backdrop-blur-sm border border-white/10">
             <span className="text-[10px] font-mono text-white/85 tracking-wide">
               {results.length} matches
@@ -262,52 +301,13 @@ export default function VideoGroupCard({ group, onTimestampClick }: VideoGroupCa
             {video_title}
           </p>
         </div>
-        <span className="shrink-0 text-[14px]/none tracking-tight text-zinc-500 dark:text-zinc-400">
-          1d
-        </span>
+        {relativeTime && (
+          <span className="shrink-0 text-[14px]/none tracking-tight text-zinc-500 dark:text-zinc-400">
+            {relativeTime}
+          </span>
+        )}
       </div>
 
-      {/* Timestamp markers */}
-      <div className="relative mx-1 mt-2.5 h-7 rounded-full bg-white/40 dark:bg-zinc-950/40 border border-zinc-300/70 dark:border-zinc-800/70">
-        <div className="absolute left-3 right-3 top-1/2 -translate-y-1/2 h-px bg-zinc-400/40 dark:bg-zinc-500/40" />
-        <div
-          className="absolute left-3 top-1/2 -translate-y-1/2 h-px bg-search-blue/70 transition-[width] duration-100"
-          style={{ width: `calc(${progressPct}% * (100% - 24px) / 100)` }}
-        />
-        {results.map((r) => {
-          const startPct = Math.min(Math.max((r.t_start / effectiveDuration) * 100, 0), 100)
-          const widthPct = Math.max(((r.t_end - r.t_start) / effectiveDuration) * 100, 1.5)
-          return (
-            <Tooltip key={r.t_start}>
-              <TooltipTrigger asChild>
-                <button
-                  onClick={() => onTimestampClick(r)}
-                  style={{
-                    left: `calc(${startPct}% * (100% - 24px) / 100 + 12px)`,
-                    width: `calc(${widthPct}% * (100% - 24px) / 100)`,
-                  }}
-                  className="absolute top-1/2 -translate-y-1/2 h-2 rounded-full focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-search-blue"
-                  aria-label={`Jump to ${formatTime(r.t_start)}`}
-                >
-                  <div
-                    className={cn(
-                      'h-full w-full rounded-full bg-search-blue transition-all duration-150 hover:brightness-125',
-                      r.score >= 30
-                        ? 'opacity-100'
-                        : r.score >= 25
-                          ? 'opacity-75'
-                          : 'opacity-50',
-                    )}
-                  />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="text-[10px] font-mono px-1.5 py-0.5">
-                {formatTime(r.t_start)} → {formatTime(r.t_end)}
-              </TooltipContent>
-            </Tooltip>
-          )
-        })}
-      </div>
     </div>
   )
 }

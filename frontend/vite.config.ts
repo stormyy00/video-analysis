@@ -17,6 +17,9 @@ const config = defineConfig({
     tanstackStart(),
     viteReact(),
   ],
+  ssr: {
+    noExternal: ['@vidstack/react'],
+  },
 })
 
 export default config
